@@ -25,7 +25,7 @@ import re
 import random
 import asyncio
 from .data_manager import DataManager
-from .handle_response import TEMP_GROUP_HISTORY_CACHE, TEMP_GROUP_MEMBERS_CACHE
+from .handle_response import TEMP_GROUP_HISTORY_CACHE
 
 
 class GroupManagerHandle:
@@ -262,16 +262,7 @@ class GroupManagerHandle:
             # 移除数量本身（如果误匹配到了）
             targets.discard(str(requested_count))
 
-            # 先获取群成员列表（用于识别管理员/群主），再获取群历史消息，并通过echo做唯一标记
-            member_note = f"{MODULE_NAME}-recall"
-            member_echo_key = f"get_group_member_list-group_id={self.group_id}-{member_note}"
-            await get_group_member_list(
-                self.websocket,
-                self.group_id,
-                False,
-                note=member_note,
-            )
-
+            # 发送获取群历史消息请求，并通过echo做唯一标记
             # 为了跳过命令消息本身，获取数量=请求数量+1
             note = f"{MODULE_NAME}-recall-mid={self.message_id}"
             echo_key = f"get_group_msg_history-{self.group_id}-{note}"
@@ -286,20 +277,9 @@ class GroupManagerHandle:
             # 异步等待响应处理器缓存数据
             await asyncio.sleep(1)
             messages = TEMP_GROUP_HISTORY_CACHE.pop(echo_key, None)
-            members = TEMP_GROUP_MEMBERS_CACHE.pop(member_echo_key, None)
 
             if not messages:
                 return
-
-            # 构建管理员/群主ID集合（如果能拿到）
-            admin_owner_ids = set()
-            if isinstance(members, list):
-                for m in members:
-                    role = str(m.get("role", "")).lower()
-                    if role in {"admin", "owner"}:
-                        uid = str(m.get("user_id", ""))
-                        if uid:
-                            admin_owner_ids.add(uid)
 
             # 遍历并撤回（跳过命令消息、忽略admin/owner、仅删除最多max_delete条）
             deleted = 0
@@ -316,8 +296,6 @@ class GroupManagerHandle:
 
                 # 忽略管理员与群主消息
                 if sender_role in admin_roles:
-                    continue
-                if admin_owner_ids and sender_uid in admin_owner_ids:
                     continue
 
                 # 如果未指定targets，则直接撤回；否则仅撤回命中的消息
