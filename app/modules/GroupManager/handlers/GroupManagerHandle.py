@@ -25,7 +25,7 @@ import re
 import random
 import asyncio
 from .data_manager import DataManager
-from .handle_response import TEMP_GROUP_HISTORY_CACHE
+from .handle_response import TEMP_GROUP_HISTORY_CACHE, TEMP_GROUP_MEMBERS_CACHE
 
 
 class GroupManagerHandle:
@@ -237,15 +237,20 @@ class GroupManagerHandle:
         撤回最近N条消息，支持指定用户：
         撤回 50                -> 撤回最近50条消息
         撤回 50 @xxx 123456    -> 仅撤回最近50条中由@xxx和QQ号123456发送的消息
+        规则调整：
+        - 管理员发送撤回命令本身也算一条消息，因此需要多取1条历史消息
+        - 实际撤回条数不包含命令消息本身
+        - 忽略群身份为admin/owner的消息
+        - 撤回数量上限为10
         """
         try:
             # 提取数量
             count_match = re.search(r"撤回\s+(\d+)", self.raw_message)
             if not count_match:
                 return
-            count = int(count_match.group(1))
-            # 做一下上限保护，避免一次请求过大
-            count = max(1, min(count, 200))
+            requested_count = int(count_match.group(1))
+            # 上限保护：最多撤回10条，最少1条
+            max_delete = max(1, min(requested_count, 10))
 
             # 提取目标用户（@和纯QQ号）
             targets = set()
@@ -256,15 +261,25 @@ class GroupManagerHandle:
             for m in re.finditer(r"\b(\d{5,12})\b", self.raw_message):
                 targets.add(m.group(1))
             # 移除数量本身（如果误匹配到了）
-            targets.discard(str(count))
+            targets.discard(str(requested_count))
 
-            # 发送获取群历史消息请求，并通过echo做唯一标记
+            # 先获取群成员列表（用于识别管理员/群主），再获取群历史消息，并通过echo做唯一标记
+            member_note = f"{MODULE_NAME}-recall"
+            member_echo_key = f"get_group_member_list-group_id={self.group_id}-{member_note}"
+            await get_group_member_list(
+                self.websocket,
+                self.group_id,
+                False,
+                note=member_note,
+            )
+
+            # 为了跳过命令消息本身，获取数量=请求数量+1
             note = f"{MODULE_NAME}-recall-mid={self.message_id}"
             echo_key = f"get_group_msg_history-{self.group_id}-{note}"
             await get_group_msg_history(
                 self.websocket,
                 self.group_id,
-                count=count,
+                count=max_delete + 1,
                 message_seq=0,
                 note=note,
             )
@@ -272,18 +287,44 @@ class GroupManagerHandle:
             # 异步等待响应处理器缓存数据
             await asyncio.sleep(1)
             messages = TEMP_GROUP_HISTORY_CACHE.pop(echo_key, None)
+            members = TEMP_GROUP_MEMBERS_CACHE.pop(member_echo_key, None)
+
             if not messages:
                 return
 
-            # 遍历并撤回
+            # 构建管理员/群主ID集合（如果能拿到）
+            admin_owner_ids = set()
+            if isinstance(members, list):
+                for m in members:
+                    role = str(m.get("role", "")).lower()
+                    if role in {"admin", "owner"}:
+                        uid = str(m.get("user_id", ""))
+                        if uid:
+                            admin_owner_ids.add(uid)
+
+            # 遍历并撤回（跳过命令消息、忽略admin/owner、仅删除最多max_delete条）
+            deleted = 0
+            admin_roles = {"admin", "owner"}
             for msg in messages:
+                if deleted >= max_delete:
+                    break
                 mid = str(msg.get("message_id", ""))
                 if not mid or mid == str(self.message_id):
                     continue
-                sender_uid = str(msg.get("sender", {}).get("user_id", ""))
+                sender = msg.get("sender", {})
+                sender_uid = str(sender.get("user_id", ""))
+                sender_role = str(sender.get("role", "")).lower()
+
+                # 忽略管理员与群主消息
+                if sender_role in admin_roles:
+                    continue
+                if admin_owner_ids and sender_uid in admin_owner_ids:
+                    continue
+
                 # 如果未指定targets，则直接撤回；否则仅撤回命中的消息
                 if not targets or sender_uid in targets:
                     await delete_msg(self.websocket, mid)
+                    deleted += 1
         except Exception as e:
             logger.error(f"[{MODULE_NAME}]批量撤回操作失败: {e}")
 
