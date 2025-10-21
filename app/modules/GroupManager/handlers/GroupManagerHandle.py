@@ -241,7 +241,6 @@ class GroupManagerHandle:
         - 管理员发送撤回命令本身也算一条消息，因此需要多取1条历史消息
         - 实际撤回条数不包含命令消息本身
         - 忽略群身份为admin/owner的消息
-        - 撤回数量上限为10
         """
         try:
             # 提取数量
@@ -249,8 +248,8 @@ class GroupManagerHandle:
             if not count_match:
                 return
             requested_count = int(count_match.group(1))
-            # 上限保护：最多撤回10条，最少1条
-            max_delete = max(1, min(requested_count, 10))
+            # 取消上限保护：按请求数量执行，最少1条
+            max_delete = max(1, requested_count)
 
             # 提取目标用户（@和纯QQ号）
             targets = set()
